@@ -1,0 +1,279 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper functions for admin checks ──────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data;
+    }
+
+    function isSuperAdmin() {
+      return isSignedIn() && (userDoc(request.auth.uid).adminLevel == 'super_admin');
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        userDoc(request.auth.uid).role == 'admin' ||
+        userDoc(request.auth.uid).adminLevel == 'super_admin' ||
+        userDoc(request.auth.uid).adminLevel == 'moderator'
+      );
+    }
+
+    function conversationDoc(conversationId) {
+      return get(/databases/$(database)/documents/conversations/$(conversationId));
+    }
+
+    function isParticipant(conversationId) {
+      return isSignedIn()
+        && request.auth.uid in
+          conversationDoc(conversationId).data.participantIds;
+    }
+
+    function isBlocked(a, b) {
+      return exists(/databases/$(database)/documents/users/$(a)/blockedUsers/$(b))
+        || exists(/databases/$(database)/documents/users/$(b)/blockedUsers/$(a));
+    }
+
+    // True if this write does not change role/adminLevel at all,
+    // compared against the existing document (diff-based, not
+    // presence-based — presence-based checks break on every edit
+    // once the field already exists on the doc).
+    function noRoleChange() {
+      return !request.resource.data.diff(resource.data).affectedKeys()
+              .hasAny(['role', 'adminLevel']);
+    }
+
+    // ── users/{userId} ──────────────────────────────────────────────
+    // Owners may create/update their own profile but can never set or
+    // change role/adminLevel. Admins can read all profiles and update
+    // other users' non-role fields. Only super_admin can set/change
+    // role/adminLevel, or delete a user document.
+    match /users/{userId} {
+
+      // Create: owner may create their own profile document, but must
+      // not set role/adminLevel at creation time either (this was the
+      // privilege-escalation hole in the original rules — `create`
+      // had no field restriction at all).
+      allow create: if isSignedIn() && request.auth.uid == userId
+        && !request.resource.data.keys().hasAny(['role', 'adminLevel']);
+
+      // Signed-in users may fetch a known uploader profile for Match Details.
+      // Listing the users collection remains restricted to admins; this avoids
+      // making the complete user directory publicly queryable.
+      allow get: if isSignedIn();
+      allow list: if isSignedIn() && isAdmin();
+
+      // Update: owner or admin may update as long as role/adminLevel
+      // isn't touched. Super admin may change anything, including
+      // role/adminLevel.
+      allow update: if isSignedIn() && (
+        (request.auth.uid == userId && noRoleChange())
+        || (isAdmin() && noRoleChange())
+        || isSuperAdmin()
+      );
+
+      // Only super admins may delete user documents.
+      allow delete: if isSuperAdmin();
+
+      match /chatPreferences/{conversationId} {
+        allow read: if isSignedIn() && request.auth.uid == userId;
+        allow create, update: if isSignedIn() && request.auth.uid == userId
+          && request.resource.data.keys().hasOnly(['muted', 'pinned', 'archived', 'updatedAt']);
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+
+      match /blockedUsers/{blockedUid} {
+        allow read, create, update, delete: if isSignedIn() && request.auth.uid == userId
+          && blockedUid != userId;
+      }
+
+      match /devices/{deviceId} {
+        allow read: if isSignedIn() && request.auth.uid == userId;
+        allow create, update: if isSignedIn() && request.auth.uid == userId
+          && request.resource.data.keys().hasOnly(['token', 'platform', 'createdAt', 'updatedAt']);
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+    }
+
+    match /conversations/{conversationId} {
+      // A deterministic direct-chat transaction first reads its target ID.
+      // Permit the missing-document result, but never expose an existing
+      // conversation to anyone outside its participant list.
+      allow get: if isSignedIn() && (
+        !exists(
+          /databases/$(database)/documents/conversations/$(conversationId)
+        )
+        || request.auth.uid in resource.data.participantIds
+      );
+      allow list: if isSignedIn()
+        && request.auth.uid in resource.data.participantIds;
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasOnly([
+          'type', 'participantIds', 'createdAt', 'updatedAt',
+          'lastMessageText', 'lastMessageType', 'lastMessageSenderId',
+          'lastMessageAt', 'unreadCounts', 'lastReadAt',
+          'lastDeliveredAt', 'contextFlareId', 'schemaVersion'
+        ])
+        && request.resource.data.type == 'direct'
+        && request.resource.data.participantIds is list
+        && request.resource.data.participantIds.size() == 2
+        && request.resource.data.participantIds[0] != request.resource.data.participantIds[1]
+        && request.auth.uid in request.resource.data.participantIds
+        && conversationId == 'direct_'
+          + request.resource.data.participantIds[0]
+          + '_'
+          + request.resource.data.participantIds[1]
+        && !isBlocked(
+          request.resource.data.participantIds[0],
+          request.resource.data.participantIds[1]
+        );
+      allow update: if isSignedIn() && request.auth.uid in resource.data.participantIds
+        && request.resource.data.participantIds == resource.data.participantIds
+        && request.resource.data.type == 'direct'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'updatedAt', 'lastMessageId', 'lastMessageText',
+          'lastMessageType', 'lastMessageSenderId', 'lastMessageAt',
+          'unreadCounts', 'lastReadAt', 'lastDeliveredAt'
+        ]);
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if isParticipant(conversationId);
+        allow create: if isParticipant(conversationId)
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.clientMessageId == messageId
+          && request.resource.data.type in ['text','image','video','audio','file','flare','system']
+          && request.resource.data.keys().hasOnly([
+            'senderId', 'type', 'text', 'createdAt', 'clientCreatedAt',
+            'editedAt', 'replyTo', 'reactions', 'deletedFor',
+            'deletedForEveryone', 'deletedAt', 'media',
+            'clientMessageId', 'flareId'
+          ])
+          && !isBlocked(
+            conversationDoc(conversationId).data.participantIds[0],
+            conversationDoc(conversationId).data.participantIds[1]
+          );
+        allow update: if isParticipant(conversationId)
+          && request.resource.data.senderId == resource.data.senderId
+          && request.resource.data.clientMessageId == resource.data.clientMessageId
+          && (
+            (request.auth.uid == resource.data.senderId
+              && request.resource.data.diff(resource.data)
+                .affectedKeys().hasOnly(['text', 'editedAt'])
+              && request.resource.data.deletedForEveryone == false)
+            || (request.auth.uid == resource.data.senderId
+              && request.resource.data.diff(resource.data).affectedKeys()
+                .hasOnly([
+                  'text', 'deletedForEveryone', 'deletedAt', 'media'
+                ])
+              && request.resource.data.deletedForEveryone == true
+              && request.resource.data.text == '')
+            || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions'])
+              && request.resource.data.reactions
+                .diff(resource.data.reactions)
+                .affectedKeys().hasOnly([request.auth.uid]))
+            || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedFor'])
+              && request.resource.data.deletedFor
+                .removeAll([request.auth.uid])
+                == resource.data.deletedFor.removeAll([request.auth.uid]))
+          );
+        allow delete: if false;
+      }
+
+      match /typing/{typingUid} {
+        allow read: if isParticipant(conversationId);
+        allow create, update: if isParticipant(conversationId) && request.auth.uid == typingUid
+          && request.resource.data.keys().hasOnly(['isTyping','updatedAt']);
+        allow delete: if isParticipant(conversationId) && request.auth.uid == typingUid;
+      }
+    }
+
+    match /presence/{userId} {
+      allow get: if isSignedIn();
+      allow list: if false;
+      allow create, update: if isSignedIn() && request.auth.uid == userId
+        && request.resource.data.keys().hasOnly(['state','lastActiveAt'])
+        && request.resource.data.state in ['online','offline'];
+      allow delete: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    // ── flares/{flareId} ────────────────────────────────────────────
+    // Public reads. Only signed-in users can create, and only as
+    // themselves. Author has full write access; any signed-in user may
+    // update engagement fields (loveCount/lovedBy/commentCount), but
+    // only their own membership in lovedBy and only in lockstep with
+    // loveCount, so nobody can toggle other people's likes or set an
+    // arbitrary count.
+    match /flares/{flareId} {
+      allow read: if true;
+
+      allow create: if request.auth != null
+        && request.resource.data.authorUid == request.auth.uid;
+
+      allow update: if request.auth != null
+        && (resource.data.authorUid == request.auth.uid
+            || isValidEngagementUpdate());
+
+      allow delete: if request.auth != null
+        && resource.data.authorUid == request.auth.uid;
+
+      // comments sub-collection: any auth user can read/create; only
+      // the comment author can delete their own comment. Comments are
+      // immutable once created (no update path).
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if request.auth != null
+          && request.resource.data.authorUid == request.auth.uid;
+        allow delete: if request.auth != null
+          && resource.data.authorUid == request.auth.uid;
+        allow update: if false;
+      }
+    }
+
+    // Only loveCount, lovedBy, commentCount may change on a
+    // non-author update.
+    function onlyEngagementFields(newData, oldData) {
+      let allowed = ['loveCount', 'lovedBy', 'commentCount'];
+      let changed = newData.diff(oldData).affectedKeys();
+      return changed.hasOnly(allowed);
+    }
+
+    // A signed-in user may only add or remove *their own* uid from
+    // lovedBy, and loveCount must move by exactly +1/-1 to match that
+    // change. commentCount is allowed to change freely (it's driven by
+    // the comments sub-collection, not by this user directly) but
+    // nothing else may move.
+    function isValidEngagementUpdate() {
+      let uid = request.auth.uid;
+      let oldLoved = resource.data.lovedBy;
+      let newLoved = request.resource.data.lovedBy;
+      let addedSelf = !oldLoved.hasAny([uid]) && newLoved.hasAny([uid])
+        && newLoved.removeAll([uid]) == oldLoved;
+      let removedSelf = oldLoved.hasAny([uid]) && !newLoved.hasAny([uid])
+        && oldLoved.removeAll([uid]) == newLoved;
+
+      return onlyEngagementFields(request.resource.data, resource.data)
+        && (
+          (addedSelf && request.resource.data.loveCount == resource.data.loveCount + 1)
+          || (removedSelf && request.resource.data.loveCount == resource.data.loveCount - 1)
+          || (newLoved == oldLoved && request.resource.data.loveCount == resource.data.loveCount)
+        );
+    }
+
+    // ── admin_controls/{doc} ────────────────────────────────────────
+    match /admin_controls/{doc} {
+      allow read, write: if isAdmin();
+    }
+
+    // Everything else stays locked down until rules are defined for it
+    // (chat, etc.) as those collections get built.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

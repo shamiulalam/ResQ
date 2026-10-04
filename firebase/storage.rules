@@ -1,0 +1,27 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // flares/{flareId}/photo.jpg — anyone can view a flare's photo
+    // (same public-read reasoning as the Firestore flares collection),
+    // but only a signed-in user can upload one.
+    //
+    // NOTE: this doesn't verify the uploader is the flare's actual
+    // author (Storage rules can't easily cross-reference a Firestore
+    // document). That check lives in FlareService.createFlare, which
+    // always uploads to a path matching a flare document it's about to
+    // create with authorUid set to the current user — so in practice
+    // this is fine, but if photo uploads are ever exposed anywhere
+    // else, revisit this.
+    match /flares/{flareId}/{fileName} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Everything else stays locked down.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
