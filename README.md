@@ -174,13 +174,9 @@ The Python router modules define these routes (all under the `/api` prefix):
 | `POST` | `/api/chat/notifications/send` | Send a message notification to the other participant's registered devices. |
 
 ## Current integration notes
-
-- The FastAPI routers are present, but there is no checked-in `main.py`/ASGI app to include them or expose the health endpoint the Flutter client can query. The API cannot be launched as a complete service from this repository until that bootstrap is added.
-- The Supabase `pets` vector schema and `match_pets` RPC are expected by the client but are not present in the committed migration directory. Pet search requires those database objects to be provisioned.
-- `frontend/lib/database/services/huggingface_service.dart` retains its historical class name. It calls the project's FastAPI backend; it does not call Hugging Face's hosted inference API.
 - Email/password authentication is implemented. Google sign-in currently reports that it is not configured.
 - The Android Firebase configuration file is project-specific. Replace it with the configuration for your own Firebase project when creating a separate deployment.
 
 ## License
 
-No license file is currently included. Add a license before redistributing or reusing this project.
+No license file is currently included.
