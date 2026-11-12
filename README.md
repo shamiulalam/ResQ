@@ -174,7 +174,7 @@ The Python router modules define these routes (all under the `/api` prefix):
 | `POST` | `/api/chat/notifications/send` | Send a message notification to the other participant's registered devices. |
 
 ## Current integration notes
-- Email/password authentication is implemented. Google sign-in currently reports that it is not configured.
+- Email/password authentication is implemented. Google sign-in is not configured yet.
 - The Android Firebase configuration file is project-specific. Replace it with the configuration for your own Firebase project when creating a separate deployment.
 
 ## License
