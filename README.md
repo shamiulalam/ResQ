@@ -176,6 +176,8 @@ The Python router modules define these routes (all under the `/api` prefix):
 ## Current integration notes
 - Email/password authentication is implemented. Google sign-in is not configured yet.
 - The Android Firebase configuration file is project-specific. Replace it with the configuration for your own Firebase project when creating a separate deployment.
+- As it was built within a short timeframe (1.5 months), some of the features in Admin panel is not configured yet.
+- For the same reason, a few tabs on the user's panel is yet to be completed.
 
 ## License
 
